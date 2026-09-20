@@ -1,0 +1,6 @@
+nodriver>=0.30
+mcp==1.0.0
+starlette
+uvicorn
+sse-starlette
+httpx>=0.25.0
