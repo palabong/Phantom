@@ -5,7 +5,7 @@ ENV PYTHONUNBUFFERED=1 \
 
 # System deps + Xvfb + minimal GL for software WebGL
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    xvfb xauth \
+    xvfb xauth procps \
     wget gnupg ca-certificates \
     libgl1 libglib2.0-0 libnss3 libatk-bridge2.0-0 libgtk-3-0 \
     fonts-liberation libasound2 libatk1.0-0 libcups2 libdrm2 \

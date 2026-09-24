@@ -51,3 +51,11 @@ logs/
 
 # Fly.io / deploy artefacts
 .fly/
+
+# Local logs, reports, and run telemetry
+runs/
+reports/
+.pytest_cache/
+.pytest_cache
+__pycache__/
+
