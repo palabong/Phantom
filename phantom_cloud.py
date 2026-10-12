@@ -19,6 +19,24 @@ from mcp.server import Server
 from mcp.server.sse import SseServerTransport
 import mcp.types as types
 
+def _load_env_file():
+    env_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
+    if os.path.exists(env_file):
+        try:
+            with open(env_file, "r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if line and not line.startswith("#") and "=" in line:
+                        k, v = line.split("=", 1)
+                        k = k.strip()
+                        v = v.strip().strip("\"'")
+                        if k and k not in os.environ:
+                            os.environ[k] = v
+        except Exception:
+            pass
+
+_load_env_file()
+
 PORT = int(os.getenv("PORT", 8000))
 UNKEY_API_ID = os.getenv("UNKEY_API_ID")
 UNKEY_ROOT_KEY = os.getenv("UNKEY_ROOT_KEY")
@@ -97,10 +115,10 @@ def patch_nodriver():
 
 patch_nodriver()
 
-# Concurrency guard: max one active browser session at a time (reversible)
+# Concurrency guard: cap overlapping navigate calls (reversible)
 _browser_lock = asyncio.Lock()
 _active_sessions = 0
-MAX_CONCURRENT_SESSIONS = 1
+MAX_CONCURRENT_SESSIONS = 6
 
 STEALTH_INJECTION_PAYLOAD = """(() => {
     'use strict';
@@ -219,6 +237,9 @@ class StealthState:
     browser = None
     page = None
     element_map = {}
+    proxy_username = None
+    proxy_password = None
+    use_proxy = False
 
 state = StealthState()
 
@@ -261,8 +282,90 @@ class AOMDistiller(HTMLParser):
         if not self.in_ignore_block and data.strip():
             self.text_buffer.append(data.strip())
 
+
+_paused_proxy_requests = set()
+
+async def _log_if_still_paused(request_id: str):
+    await asyncio.sleep(1.0)
+    if request_id in _paused_proxy_requests:
+        _log("proxy_request_still_paused", request_id=request_id)
+
+async def _arm_proxy_fetch():
+    """Auth-only Fetch. Empty patterns do not pause document navigations."""
+    if not state.page:
+        return
+    if not (state.use_proxy and state.proxy_username and state.proxy_password):
+        try:
+            await state.page.send(uc.cdp.fetch.disable())
+        except Exception:
+            pass
+        return
+    try:
+        await state.page.send(uc.cdp.fetch.enable(patterns=[], handle_auth_requests=True))
+
+        async def handle_request_paused(event: uc.cdp.fetch.RequestPaused):
+            request_id = str(event.request_id)
+            _paused_proxy_requests.add(request_id)
+            asyncio.create_task(_log_if_still_paused(request_id))
+            try:
+                await state.page.send(
+                    uc.cdp.fetch.continue_request(request_id=event.request_id)
+                )
+                _paused_proxy_requests.discard(request_id)
+            except Exception:
+                pass
+
+        async def handle_auth_required(event: uc.cdp.fetch.AuthRequired):
+            request_id = str(event.request_id)
+            _paused_proxy_requests.add(request_id)
+            asyncio.create_task(_log_if_still_paused(request_id))
+            _log("proxy_auth_requested", request_id=request_id)
+            challenge_response = uc.cdp.fetch.AuthChallengeResponse(
+                response="ProvideCredentials",
+                username=state.proxy_username,
+                password=state.proxy_password
+            )
+            try:
+                await state.page.send(
+                    uc.cdp.fetch.continue_with_auth(
+                        request_id=event.request_id,
+                        auth_challenge_response=challenge_response
+                    )
+                )
+                _paused_proxy_requests.discard(request_id)
+                _log("proxy_auth_supplied", request_id=request_id)
+            except Exception as auth_err:
+                _log("proxy_auth_failed", error=str(auth_err))
+
+        state.page.add_handler(uc.cdp.fetch.RequestPaused, handle_request_paused)
+        state.page.add_handler(uc.cdp.fetch.AuthRequired, handle_auth_required)
+        _log("proxy_auth_handler_registered")
+    except Exception as e:
+        _log("proxy_auth_setup_failed", error=str(e))
+
 async def init_browser():
     if not state.browser:
+        cdp_port = os.getenv("CHROME_DEBUGGING_PORT")
+        if cdp_port:
+            _log("attaching_to_existing_chrome", port=cdp_port)
+            config = uc.Config()
+            config.host = "127.0.0.1"
+            config.port = int(cdp_port)
+            state.browser = await uc.start(config=config)
+            target_page = None
+            for t in state.browser.tabs:
+                if "products" in (t.url or "") or "admin.shopify" in (t.url or ""):
+                    target_page = t
+                    break
+            state.page = target_page or state.browser.main_tab
+            try:
+                await state.page.send(uc.cdp.page.enable())
+                await state.page.send(uc.cdp.page.add_script_to_evaluate_on_new_document(source=STEALTH_INJECTION_PAYLOAD))
+            except Exception as e:
+                _log("attach_cdp_warn", error=str(e))
+            _log("attached_to_existing_chrome_done", tab_id=getattr(state.page, "target_id", "unknown"), url=getattr(state.page, "url", ""))
+            return
+
         # Pre-cleanup: Kill any previous orphaned chrome/chromium processes to prevent conflicts/resource exhaustion
         try:
             import subprocess
@@ -278,6 +381,7 @@ async def init_browser():
             "--disable-blink-features=AutomationControlled",
             "--disable-dev-shm-usage",
             "--window-size=1920,1080",
+            "--ignore-certificate-errors",
             # WebGL software path (B)
             "--use-gl=angle",
             "--use-angle=swiftshader-webgl",
@@ -371,42 +475,10 @@ async def init_browser():
         await state.page.send(uc.cdp.page.enable())
         await state.page.send(uc.cdp.page.add_script_to_evaluate_on_new_document(source=STEALTH_INJECTION_PAYLOAD))
         
-        # Enable CDP proxy credentials auto-supply if auth credentials are provided
-        if use_proxy and proxy_username and proxy_password:
-            try:
-                await state.page.send(uc.cdp.fetch.enable(handle_auth_requests=True))
-                
-                async def handle_request_paused(event: uc.cdp.fetch.RequestPaused):
-                    try:
-                        await state.page.send(
-                            uc.cdp.fetch.continue_request(request_id=event.request_id)
-                        )
-                    except Exception:
-                        pass
-                
-                async def handle_auth_required(event: uc.cdp.fetch.AuthRequired):
-                    _log("proxy_auth_requested", request_id=event.request_id)
-                    challenge_response = uc.cdp.fetch.AuthChallengeResponse(
-                        response="ProvideCredentials",
-                        username=proxy_username,
-                        password=proxy_password
-                    )
-                    try:
-                        await state.page.send(
-                            uc.cdp.fetch.continue_with_auth(
-                                request_id=event.request_id,
-                                auth_challenge_response=challenge_response
-                            )
-                        )
-                        _log("proxy_auth_supplied", request_id=event.request_id)
-                    except Exception as auth_err:
-                        _log("proxy_auth_failed", error=str(auth_err))
-
-                state.page.add_handler(uc.cdp.fetch.RequestPaused, handle_request_paused)
-                state.page.add_handler(uc.cdp.fetch.AuthRequired, handle_auth_required)
-                _log("proxy_auth_handler_registered")
-            except Exception as e:
-                _log("proxy_auth_setup_failed", error=str(e))
+        state.use_proxy = use_proxy
+        state.proxy_username = proxy_username
+        state.proxy_password = proxy_password
+        await _arm_proxy_fetch()
                 
         _log("browser_started", headless=False, webgl_flags=True, webgl_spoofed=True, canvas_poisoning=True, chrome="google-chrome-stable", cdp_injected=True)
 
@@ -566,6 +638,7 @@ async def handle_call_tool(name: str, arguments: dict) -> list[types.TextContent
                     # Reinject the stealth script onto the new target
                     await state.page.send(uc.cdp.page.enable())
                     await state.page.send(uc.cdp.page.add_script_to_evaluate_on_new_document(source=STEALTH_INJECTION_PAYLOAD))
+                    await _arm_proxy_fetch()
                     _log("target_swap_recovered", tab_id=getattr(state.page, "target_id", "unknown"))
             except Exception as recover_err:
                 _log("target_swap_recovery_failed", error=str(recover_err))
@@ -598,9 +671,27 @@ async def handle_call_tool(name: str, arguments: dict) -> list[types.TextContent
                 await init_browser()
                 await state.page.get(arguments["url"])
             await asyncio.sleep(4.5)
+            final_href = arguments.get("url", "")
+            deadline = time.monotonic() + 20.0
+            while time.monotonic() < deadline:
+                try:
+                    raw = await state.page.evaluate("""JSON.stringify((() => ({
+                        title: document.title || "",
+                        href: location.href || "",
+                        login: !!document.querySelector('input[type="email"], input[type="password"]')
+                    }))())""")
+                    info = json.loads(raw) if isinstance(raw, str) else (raw or {})
+                except Exception as poll_err:
+                    _log("navigate_poll_failed", error=str(poll_err))
+                    break
+                final_href = info.get("href") or final_href
+                title = info.get("title") or ""
+                if title != "Just a moment..." or info.get("login"):
+                    break
+                await asyncio.sleep(0.5)
             duration_ms = int((time.monotonic() - start) * 1000)
-            _log("tool_ok", tool="navigate", url=arguments.get("url", ""), duration_ms=duration_ms)
-            return [types.TextContent(type="text", text=f"Navigazione completata su {arguments['url']}")]
+            _log("tool_ok", tool="navigate", url=arguments.get("url", ""), final_href=final_href, duration_ms=duration_ms)
+            return [types.TextContent(type="text", text=f"Navigazione completata su {final_href}")]
             
         elif name == "get_snapshot":
             if not state.page:

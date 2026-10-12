@@ -1,0 +1,76 @@
+# phantom_cloud project_memory
+
+PROJECT: phantom_cloud
+UPDATED: 2026-10-08T20:07Z
+VERSION: fly-166 / git-6e95b31 / ingest-2026-10-01T12:58Z
+Path: grok/project_memory (canonical L1; no .md twin)
+Aligned to production Drive workspace 1msmuBIu_28tNkjBxhKQ6S-x9DzfZjpO5 on 2026-09-25.
+Updated 2026-10-08T20:07Z: production-tree pointer set. Fly version not re-ingested. INGEST REVISION unchanged.
+
+## Identity
+- Project: phantom_cloud — stealth browser MCP server (nodriver + Starlette/SSE). [2026-09-17]
+- Implements Phantom Architecture and AOM Distillation from the VDP / Bug Bounty strategic document. [2026-09-17]
+- Status: lead-evaluation. All monetisation roads open. Engine freeze stands. [2026-09-28]
+- H1 scope trail: grok/leads/SCOPE_TRAIL_AND_OBJECTIVES_20260928.md. Wave A engine-fit: Shopify (own store), Slack (own workspace), Whatnot, Agoda Public (UA header constraint), Wolt. Wave B verify-first: Vercel Sandbox, EUDI, Anthropic split VDP/bounty, Uber PII-stop, Box. [2026-09-28]
+- Ticket-fit five, not rechecked live 2026-10-06: Shopify, Slack, Whatnot, Wolt, Box. Agoda parked on UA flag. File grok/leads/TICKET_FIT_FIVE_20261006.md. [2026-10-06]
+- Production tree: /Users/daniele_palagi/Desktop/phantom_cloud 2 — FROZEN without named-path user directive. [2026-10-08]
+- Agent root after rearrange 2026-10-08: AGENTS.md, project_memory, phantom_cloud_architecture.md only. Functional sets: h1/, leads/, commercial/, ops/, skills/. Consult: archive/20261008/consult/. [2026-10-08]
+- Init path: AGENTS.md → project_memory → README.md → phantom_cloud_architecture.md, then read-only production tree. [2026-09-25]
+- Production workspace snapshot (device folder): Google Drive https://drive.google.com/drive/folders/1msmuBIu_28tNkjBxhKQ6S-x9DzfZjpO5 [2026-09-25]
+
+## Branch split
+- Analysis files: grok/ only.
+- NEVER modify /Users/daniele_palagi/Desktop/phantom_cloud 2 without an explicit same-turn named-path directive.
+- Official Grok Build 4.7 on the Drive-synced device folder is the operative CLI. Device cwd cited 2026-10-06: /Users/daniele_palagi/Desktop/phantom_cloud 2. [2026-10-06]
+
+## Production surface
+- Tools (local + prod): navigate, get_snapshot (html|ax), click, type, evaluate, wait. [2026-09-21]
+- Auth: Unkey when UNKEY_ROOT_KEY is set; otherwise token prefix ph_live_. Messages path /messages/t/<token>. [2026-09-21]
+- Deploy target: Fly.io app phantom-cloud-engine, region fra. Hostname https://phantom-cloud-engine.fly.dev. One machine 78197e2be34d78. [2026-09-21]
+- L0 stamp remains fly-166 / image deployment-01M3VR5JFXHPQCDF4E9CSGKGB9 / Chrome 154 / ingest 2026-10-01T12:58Z. Not re-verified from fly status in this sandbox. [2026-10-01]
+- Operator claim 2026-10-07: same machine version 193 online. Launch note 2026-10-06 cited version 192, image deployment-01M49M4AM14QB0SMXE3624KX25. Neither claim is an L0 ingest. [2026-10-07]
+- Inspector channel: 127.0.0.1:6274 on the Fly SSE. No local :8000 cold start for production smoke. Secrets not stored. [2026-10-01]
+- fly.toml: min_machines_running = 1, auto_stop_machines = true, 1gb shared-cpu-1x. [2026-09-25]
+- Runtime: Python 3.11+, Google Chrome stable, Xvfb. headless=False is intentional. [2026-09-17]
+
+## Verification
+- Accepted 6-tool smoke: runs/prod_postdeploy_20260924T153949Z. Report reports/SMOKE.md. Not mounted here on 2026-10-08. [2026-09-24]
+- Stealth evaluation 2026-09-23 PASS with caveats. SwiftShader not solved. [2026-09-23]
+- Sannysoft 20261006T234158Z on version 192: navigate/wait/html/ax/evaluate PASS, click e1 FAIL after ax consumed the ref. Not a 6-tool acceptance. Note in archive/20261008/consult/prod_reports/. [2026-10-06]
+- reports/CHANGELOG_LOCAL.md “not yet deployed” is superseded. [2026-09-25]
+
+## H1 Shopify (current)
+- Resume map: grok/h1/H1_SHOPIFY_ROADMAP_20261007.md. Store B path: grok/h1/H1_6_STORE_B_PATH_20261007.md. Evidence: grok/h1/evidence/. [2026-10-08]
+- Store A funk-it-up-sdzgxmea: hidden and archived publicly priced; cart stayed empty after availability change. Operator: empty cart is store setup, not a closed class. [2026-10-07]
+- Store B: beanie variant 67407288565988 and black-sunnies 67407280242916 add 200, cart $300. Admin read ACTIVE, Online Store published, sellable 25, DENY. Class closed on these handles. Not a draft. Checkout not opened. [2026-10-07]
+- H1-7 20261008T174242Z: store B cart add of store A variant 50535758364858 returned 422 Cannot find variant. Store A product js on B returned 404. Not a draft. Class closed on this pair. [2026-10-08]
+- H1-2 staff still blocked pending same-turn secret. [2026-10-01]
+- Gate passwords and staff secrets are not stored. [2026-10-07]
+
+## Workspace layout 2026-10-08
+- Root select set: AGENTS.md, project_memory, phantom_cloud_architecture.md.
+- Consult, not live inputs: archive/20261008/consult/ (27 CLI prompts, 6 prod/inspector notes, retired twin and strategy docx).
+- Erased as superseded: Oct 1 gate notes, battleplan 20261001, session report 20261001, truncated recap paste, executed rerun plan, device checkout 2026-09-26. [2026-10-08]
+- Hygiene reports: archive/hygiene/. [2026-10-08]
+
+## Local operations
+- Local dev venv lives at /tmp/phantom_venv. Absent in this sandbox is not a production defect. [2026-09-17]
+- Stop local engine / Chrome / Xvfb when not testing. [2026-09-20]
+- CLI task prompts are not cold starts. Generated prompts in English. Answers to the user in Italian. [2026-09-25]
+- gitlab_matrix/HARD_STOP.txt: stop when page is about:blank / not an authenticated GitLab UI. [2026-09-24]
+
+## Protected files
+- NEVER modify /Users/daniele_palagi/Desktop/phantom_cloud 2 without explicit same-turn named-path user directive. [2026-09-25]
+- Historically highlighted: phantom_cloud.py, Dockerfile, fly.toml, requirements.txt.
+
+## Monetisation vectors (all open as of 2026-09-28)
+- First-party / invitational bug bounty research under each program's live RoE.
+- Private / invitational bug bounty or continuous security services that leverage stealth.
+- API / MCP access for security teams, AI-agent platforms, or red-team operators.
+- Managed continuous-security offerings built on the engine.
+- Commercial 14-day pilot against 20260924 six-tool acceptance. Frame: grok/commercial/COMMERCIAL_ROLLOUT_20260924.md. [2026-10-08]
+
+## Memory protocol
+- Dated facts in this file change only after an explicit green light, or when the user orders that fact change in the same turn.
+- Standing authorization 2026-09-25: adapt grok/AGENTS.md when a select artifact changes. Pointers only. Never write the production tree as part of adaptation.
+- 2026-10-08: lead-map pointer updated to grok/leads/SCOPE_TRAIL_AND_OBJECTIVES_20260928.md. INGEST REVISION not bumped. [2026-10-08]

@@ -1,0 +1,122 @@
+{
+  "beanie": {
+    "price": "100.00",
+    "available": true,
+    "variants": 5
+  },
+  "black-sunnies": {
+    "price": "50.00",
+    "available": true,
+    "variants": 1
+  },
+  "canvas-sneakers": {
+    "price": "40.00",
+    "available": true,
+    "variants": 45
+  },
+  "clear-sunnies": {
+    "price": "25.00",
+    "available": true,
+    "variants": 1
+  },
+  "frontpack": {
+    "price": "200.00",
+    "available": true,
+    "variants": 5
+  },
+  "gray-leather-sneakers": {
+    "price": "1000.00",
+    "available": true,
+    "variants": 9
+  },
+  "gray-runners": {
+    "price": "30.00",
+    "available": true,
+    "variants": 11
+  },
+  "half-zip": {
+    "price": "100.00",
+    "available": true,
+    "variants": 10
+  },
+  "high-top-sneakers": {
+    "price": "180.00",
+    "available": true,
+    "variants": 5
+  },
+  "hoodie": {
+    "price": "90.00",
+    "available": true,
+    "variants": 20
+  },
+  "hoodie-old": {
+    "price": "90.00",
+    "available": true,
+    "variants": 20
+  },
+  "leggings": {
+    "price": "20.00",
+    "available": true,
+    "variants": 15
+  },
+  "light-puffer": {
+    "price": "80.00",
+    "available": true,
+    "variants": 15
+  },
+  "men-crewneck": {
+    "price": "120.00",
+    "available": true,
+    "variants": 15
+  },
+  "men-t-shirt": {
+    "price": "40.00",
+    "available": true,
+    "variants": 20
+  },
+  "puffer": {
+    "price": "80.00",
+    "available": true,
+    "variants": 15
+  },
+  "puffer-jacket": {
+    "price": "90.00",
+    "available": true,
+    "variants": 15
+  },
+  "shorts": {
+    "price": "45.00",
+    "available": true,
+    "variants": 15
+  },
+  "slides": {
+    "price": "25.00",
+    "available": true,
+    "variants": 3
+  },
+  "soft-cotton-hoodie-in-clay": {
+    "price": "90.00",
+    "available": true,
+    "variants": 4
+  },
+  "soft-cotton-hoodie-in-green": {
+    "price": "90.00",
+    "available": true,
+    "variants": 4
+  },
+  "soft-cotton-hoodie-in-jam": {
+    "price": "90.00",
+    "available": true,
+    "variants": 4
+  },
+  "soft-cotton-hoodie-in-ocean": {
+    "price": "90.00",
+    "available": true,
+    "variants": 4
+  },
+  "soft-cotton-hoodie-in-violet": {
+    "price": "90.00",
+    "available": true,
+    "variants": 4
+  }
+}

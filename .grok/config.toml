@@ -1,0 +1,17 @@
+# Project MCP only is applied from this file ([mcp_servers], [plugins], [permission], [mcp]).
+# [agent] / [subagents] are recorded for operators; Grok loads those from ~/.grok/config.toml
+# or from CLI: grok --agent-profile .grok/agents/phantom-surgery.md --no-subagents
+# Token: env PHANTOM_AUTH_TOKEN. Never paste a live key.
+
+[agent]
+name = "phantom-surgery"
+
+[subagents]
+enabled = false
+
+[mcp_servers.phantom-cloud-engine]
+type = "sse"
+url = "https://phantom-cloud-engine.fly.dev/sse/?token=${PHANTOM_AUTH_TOKEN}"
+enabled = true
+startup_timeout_sec = 120
+tool_timeout_sec = 180
