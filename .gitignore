@@ -32,6 +32,9 @@ env/
 .env.*.local
 *.pem
 *.key
+.cursor/mcp.json
+.agents/mcp_config.json
+
 
 # IDE / editor
 .idea/
