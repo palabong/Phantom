@@ -55,6 +55,8 @@ async def execute_h1_5_matrix():
                 try:
                     await session.call_tool("navigate", {"url": full_url})
                     await session.call_tool("wait", {"delay_ms": 4000})
+                    snap_res = await session.call_tool("get_snapshot", {"mode": "ax"})
+                    snap_text = snap_res.content[0].text if snap_res and snap_res.content else ""
 
                     eval_js = r"""(() => {
                         const href = location.href || "";
@@ -129,6 +131,8 @@ async def execute_h1_5_matrix():
                         "dataClass": data_class,
                         "latency_ms": round(dt * 1000, 1),
                         "mismatch": is_mismatch,
+                        "snapshot_mode": "ax",
+                        "snapshot_len": len(snap_text),
                         "details": data.get("bodySnippet", "")
                     }
                     evaluated_routes_a.append(entry)
@@ -157,6 +161,8 @@ async def execute_h1_5_matrix():
                 try:
                     await session.call_tool("navigate", {"url": full_url})
                     await session.call_tool("wait", {"delay_ms": 4000})
+                    snap_res = await session.call_tool("get_snapshot", {"mode": "ax"})
+                    snap_text = snap_res.content[0].text if snap_res and snap_res.content else ""
 
                     eval_js = r"""(() => {
                         const href = location.href || "";
@@ -207,6 +213,8 @@ async def execute_h1_5_matrix():
                         "dataClass": data_class,
                         "latency_ms": round(dt * 1000, 1),
                         "mismatch": False,
+                        "snapshot_mode": "ax",
+                        "snapshot_len": len(snap_text),
                         "details": data.get("bodySnippet", "")
                     }
                     evaluated_routes_b.append(entry)
@@ -241,6 +249,7 @@ async def execute_h1_5_matrix():
 
     evaluate_data = {
         "source": "local-chrome",
+        "snapshot_mode": "ax",
         "loggedInAsStaff": True,
         "grant": "Prodotti Visualizza",
         "routes": eval_routes_formatted,

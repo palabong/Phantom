@@ -81,6 +81,13 @@ HIDDEN_ARCHIVED = {"the-hidden-snowboard", "the-archived-snowboard"}
 
 
 def find_add_to_cart_ref(snapshot_text):
+    # AX snapshot pattern: [ax39: BUTTON 'Add to cart']
+    m_ax = re.search(r"\[((?:ax|e)\d+):\s+BUTTON\s+'Add to cart'\]", snapshot_text, re.I)
+    if m_ax:
+        return m_ax.group(1)
+    m_ax_gen = re.search(r"\[((?:ax|e)\d+):\s+(?:BUTTON|INPUT)[^\]]*'Add to cart'[^\]]*\]", snapshot_text, re.I)
+    if m_ax_gen:
+        return m_ax_gen.group(1)
     m = re.search(r"\[(e\d+):\s+(?:BUTTON|INPUT)\s+'add'\]\s*Add to cart", snapshot_text, re.I)
     if m:
         return m.group(1)
@@ -215,18 +222,18 @@ async def unlock_if_needed(session, base, run_dir):
     st2 = await page_state(session)
     if not st2.get("hasPasswordForm") and "/password" not in str(st2.get("path", "")):
         return "UNLOCKED"
-    html = _tool_text(await session.call_tool("get_snapshot", {"mode": "html"}))
-    pwd_ref = "e2"
+    html = _tool_text(await session.call_tool("get_snapshot", {"mode": "ax"}))
+    pwd_ref = "ax13"
     m_pwd = re.search(
-        r"\[(e\d+):\s+INPUT[^\]]*?(?:password|Enter store using password)[^\]]*?\]",
+        r"\[((?:ax|e)\d+):\s+(?:INPUT|TEXTBOX|TEXTFIELD)[^\]]*?(?:password|Enter store using password|Enter store password)[^\]]*?\]",
         html,
         re.I,
     )
     if m_pwd:
         pwd_ref = m_pwd.group(1)
-    btn_ref = "e3"
+    btn_ref = "ax15"
     m_btn = re.search(
-        r"\[(e\d+):\s+(?:BUTTON|INPUT)[^\]]*?(?:Enter|Submit)[^\]]*?\]",
+        r"\[((?:ax|e)\d+):\s+(?:BUTTON|INPUT)[^\]]*?(?:Enter|Submit)[^\]]*?\]",
         html,
         re.I,
     )
@@ -422,7 +429,7 @@ async def process_handle(session, base, handle, listing_price, store_id, run_dir
     row["sold_out_text"] = bool(pdp_info.get("sold_out"))
     row["has_add_form"] = bool(pdp_info.get("has_add_form"))
 
-    snap = _tool_text(await session.call_tool("get_snapshot", {"mode": "html"}))
+    snap = _tool_text(await session.call_tool("get_snapshot", {"mode": "ax"}))
     btn_ref = find_add_to_cart_ref(snap)
     if btn_ref:
         await session.call_tool("click", {"ref": btn_ref})
