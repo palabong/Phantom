@@ -928,6 +928,31 @@ async def _run_mcp_with_discover_guard(read_stream, write_stream):
 async def sse_asgi(scope, receive, send):
     if scope["type"] == "http":
         request = Request(scope, receive)
+        path = unquote(request.url.path)
+        method = (scope.get("method") or "GET").upper()
+
+        # Cursor probes OAuth/OIDC and Streamable HTTP on the SSE URL.
+        # A 401 here makes the client show Authenticate and hang. A POST 200
+        # is treated as Streamable HTTP success. SSE is GET-only.
+        if ".well-known" in path or path.rstrip("/").endswith("/json/version"):
+            _log("sse_probe_ignored", path=path, method=method)
+            response = JSONResponse({"error": "not_found"}, status_code=404)
+            await response(scope, receive, send)
+            return
+        if method == "OPTIONS":
+            response = JSONResponse({}, status_code=204, headers={"Allow": "GET"})
+            await response(scope, receive, send)
+            return
+        if method != "GET":
+            _log("sse_method_not_allowed", method=method, path=path)
+            response = JSONResponse(
+                {"error": "SSE endpoint accepts GET only"},
+                status_code=405,
+                headers={"Allow": "GET"},
+            )
+            await response(scope, receive, send)
+            return
+
         token = request.query_params.get("token", "")
         
         if not await verify_unkey_token(token):
@@ -1007,6 +1032,10 @@ async def messages_asgi(scope, receive, send):
             
         await transport.handle_post_message(scope, receive, send)
 
+async def oauth_probe_not_found(request: Request):
+    """Cursor MCP OAuth discovery. 404 = no OAuth; do not 401."""
+    return JSONResponse({"error": "not_found"}, status_code=404)
+
 async def health_check(request: Request):
     """Readiness probe: reports whether browser process is initialized."""
     browser_ready = state.browser is not None and state.page is not None
@@ -1071,6 +1100,12 @@ async def lifespan(app):
 
 app = Starlette(
     routes=[
+        Route("/.well-known/oauth-authorization-server", endpoint=oauth_probe_not_found),
+        Route("/.well-known/oauth-authorization-server/sse", endpoint=oauth_probe_not_found),
+        Route("/.well-known/openid-configuration", endpoint=oauth_probe_not_found),
+        Route("/.well-known/openid-configuration/sse", endpoint=oauth_probe_not_found),
+        Route("/sse/.well-known/openid-configuration", endpoint=oauth_probe_not_found),
+        Route("/json/version", endpoint=oauth_probe_not_found),
         Mount("/sse", app=sse_asgi),
         Mount("/sse/", app=sse_asgi),
         Mount("/messages", app=messages_asgi),
