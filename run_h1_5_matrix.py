@@ -8,7 +8,10 @@ import re
 from mcp.client.sse import sse_client
 from mcp import ClientSession
 
-SSE_URL = "http://127.0.0.1:8000/sse/?token=ph_live_D2aZuYtdGL6tUfuV2egoxp"
+SSE_URL = os.environ.get("PHANTOM_SSE_URL") or (
+    "http://127.0.0.1:8000/sse/?token="
+    + os.environ.get("PHANTOM_AUTH_TOKEN", "ph_live_local_verify")
+)
 
 SHOP_A = "funk-it-up-sdzgxmea"
 SHOP_B = "xxxxxx-r48zg9i1"
@@ -33,7 +36,7 @@ ROUTES_B = [
 async def execute_h1_5_matrix():
     utc_str = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     run_dir = f"runs/prod_postdeploy_{utc_str}"
-    os.makedirs(run_dir, exist_ok=True)
+    os.makedirs(run_dir, exist_ok=False)
     print(f"[*] Starting H1-5 FULL EVALUATION MATRIX in {run_dir}")
 
     evaluated_routes_a = []
@@ -64,9 +67,11 @@ async def execute_h1_5_matrix():
                         const bodyText = document.body ? document.body.innerText : "";
                         
                         // Check for permission denied indicator
-                        const hasPermissionBanner = /permission|non hai i permessi|access denied|not authorized|denied/i.test(bodyText);
-                        const isChallenge = /ci siamo quasi|just a moment|verificare la tua connessione/i.test(bodyText) || /ci siamo quasi/i.test(title);
-                        const isDeniedUI = hasPermissionBanner || isChallenge || (title === "Shopify" && !/prodotti|products/i.test(bodyText.slice(0, 500)));
+                        const hasPermissionBanner = /permission|non hai i permessi|access denied|not authorized|you do not have permission/i.test(bodyText);
+                        const isChallenge = /ci siamo quasi|just a moment|verificare la tua connessione/i.test(bodyText) || /ci siamo quasi|just a moment/i.test(title);
+                        const isLogin = href.indexOf("accounts.shopify.com") !== -1 || href.indexOf("/login") !== -1 || href.indexOf("/lookup") !== -1;
+                        const isDeniedUI = hasPermissionBanner || isChallenge || isLogin || (title === "Shopify" && !/prodotti|products/i.test(bodyText.slice(0, 500)));
+                        const nav = performance.getEntriesByType('navigation')[0];
 
                         // Inspect network resources timing
                         const resources = (performance.getEntriesByType('resource') || []).map(r => ({
@@ -92,13 +97,14 @@ async def execute_h1_5_matrix():
 
                         // Mismatch check: sensitive route accessible without grant
                         return JSON.stringify({
-                            href: href,
+                            href: href.split('?')[0],
                             title: title,
                             deniedUI: isDeniedUI,
+                            challenge: isChallenge,
+                            login: isLogin,
+                            http: nav && nav.responseStatus ? nav.responseStatus : null,
                             dataClass: dataClass,
-                            graphqlCount: graphqlCalls.length,
-                            sampleGraphql: graphqlCalls.slice(0, 5),
-                            bodySnippet: bodyText.slice(0, 200).replace(/\n+/g, ' ')
+                            graphqlCount: graphqlCalls.length
                         });
                     })()"""
 
@@ -111,10 +117,12 @@ async def execute_h1_5_matrix():
 
                     denied_ui = bool(data.get("deniedUI", True))
                     data_class = data.get("dataClass", "empty")
+                    challenge = bool(data.get("challenge"))
+                    login = bool(data.get("login"))
 
-                    # Mismatch definition: UI says not denied for sensitive route, OR sensitive data returned despite UI deny
+                    # Mismatch: a sensitive route is usable, or a deny wall still shows orders, customers, or settings.
                     is_mismatch = False
-                    if route_info["sensitive"]:
+                    if route_info["sensitive"] and not challenge and not login:
                         if not denied_ui:
                             is_mismatch = True
                             overall_mismatch = True
@@ -124,16 +132,18 @@ async def execute_h1_5_matrix():
 
                     entry = {
                         "path": p,
-                        "href": data.get("href", full_url),
+                        "href": str(data.get("href") or full_url).split("?")[0],
                         "title": data.get("title", ""),
                         "deniedUI": denied_ui,
-                        "http": 200,
+                        "challenge": challenge,
+                        "login": login,
+                        "http": data.get("http"),
                         "dataClass": data_class,
                         "latency_ms": round(dt * 1000, 1),
                         "mismatch": is_mismatch,
                         "snapshot_mode": "ax",
                         "snapshot_len": len(snap_text),
-                        "details": data.get("bodySnippet", "")
+                        "graphqlCount": data.get("graphqlCount"),
                     }
                     evaluated_routes_a.append(entry)
                     print(f"    Result: deniedUI={denied_ui}, dataClass={data_class}, mismatch={is_mismatch}")
@@ -148,7 +158,7 @@ async def execute_h1_5_matrix():
                         "dataClass": "empty",
                         "latency_ms": round(dt * 1000, 1),
                         "mismatch": False,
-                        "details": str(e)
+                        "details": re.sub(r"ph_live_[A-Za-z0-9]+", "ph_live_[REDACTED]", str(e))[:180]
                     })
 
             # --- Phase 2: Store B Routes ---
@@ -168,9 +178,11 @@ async def execute_h1_5_matrix():
                         const href = location.href || "";
                         const title = document.title || "";
                         const bodyText = document.body ? document.body.innerText : "";
-                        const hasPermissionBanner = /permission|non hai i permessi|access denied|not authorized|denied/i.test(bodyText);
-                        const isChallenge = /ci siamo quasi|just a moment|verificare la tua connessione/i.test(bodyText) || /ci siamo quasi/i.test(title);
-                        const isDeniedUI = hasPermissionBanner || isChallenge || (title === "Shopify" && !/prodotti|products/i.test(bodyText.slice(0, 500)));
+                        const hasPermissionBanner = /permission|non hai i permessi|access denied|not authorized|you do not have permission/i.test(bodyText);
+                        const isChallenge = /ci siamo quasi|just a moment|verificare la tua connessione/i.test(bodyText) || /ci siamo quasi|just a moment/i.test(title);
+                        const isLogin = href.indexOf("accounts.shopify.com") !== -1 || href.indexOf("/login") !== -1 || href.indexOf("/lookup") !== -1;
+                        const isDeniedUI = hasPermissionBanner || isChallenge || isLogin || (title === "Shopify" && !/prodotti|products/i.test(bodyText.slice(0, 500)));
+                        const nav = performance.getEntriesByType('navigation')[0];
 
                         let dataClass = "empty";
                         if (/order|ordine|draft|abandoned/i.test(bodyText) && !hasPermissionBanner) {
@@ -186,11 +198,13 @@ async def execute_h1_5_matrix():
                         }
 
                         return JSON.stringify({
-                            href: href,
+                            href: href.split('?')[0],
                             title: title,
                             deniedUI: isDeniedUI,
-                            dataClass: dataClass,
-                            bodySnippet: bodyText.slice(0, 200).replace(/\n+/g, ' ')
+                            challenge: isChallenge,
+                            login: isLogin,
+                            http: nav && nav.responseStatus ? nav.responseStatus : null,
+                            dataClass: dataClass
                         });
                     })()"""
 
@@ -203,19 +217,22 @@ async def execute_h1_5_matrix():
 
                     denied_ui = bool(data.get("deniedUI", True))
                     data_class = data.get("dataClass", "empty")
+                    challenge = bool(data.get("challenge"))
+                    login = bool(data.get("login"))
 
                     entry = {
                         "path": p,
-                        "href": data.get("href", full_url),
+                        "href": str(data.get("href") or full_url).split("?")[0],
                         "title": data.get("title", ""),
                         "deniedUI": denied_ui,
-                        "http": 200,
+                        "challenge": challenge,
+                        "login": login,
+                        "http": data.get("http"),
                         "dataClass": data_class,
                         "latency_ms": round(dt * 1000, 1),
                         "mismatch": False,
                         "snapshot_mode": "ax",
                         "snapshot_len": len(snap_text),
-                        "details": data.get("bodySnippet", "")
                     }
                     evaluated_routes_b.append(entry)
                     print(f"    Result: deniedUI={denied_ui}, dataClass={data_class}")
@@ -230,7 +247,7 @@ async def execute_h1_5_matrix():
                         "dataClass": "empty",
                         "latency_ms": round(dt * 1000, 1),
                         "mismatch": False,
-                        "details": str(e)
+                        "details": re.sub(r"ph_live_[A-Za-z0-9]+", "ph_live_[REDACTED]", str(e))[:180]
                     })
 
     # --- Phase 3: Artifact Generation ---
@@ -247,13 +264,37 @@ async def execute_h1_5_matrix():
         for r in evaluated_routes_a if r["path"] != "/products"
     ]
 
+    all_routes = evaluated_routes_a + evaluated_routes_b
+    saw_challenge = any(r.get("challenge") for r in all_routes)
+    saw_login = any(r.get("login") for r in all_routes)
+    saw_admin = any(
+        (not r.get("deniedUI")) and (not r.get("challenge")) and (not r.get("login"))
+        for r in all_routes
+    )
+    if overall_mismatch:
+        verdict = "finding-candidate"
+        reason = "A sensitive admin route was usable or showed orders, customers, or settings behind the staff grant."
+    elif saw_challenge and not saw_admin:
+        verdict = "CF"
+        reason = "Cloudflare stopped the admin read before an authenticated staff UI."
+    elif saw_login and not saw_admin:
+        verdict = "LOGIN"
+        reason = "The admin routes redirected to login. The staff session was not on this browser."
+    elif saw_admin:
+        verdict = "PASS"
+        reason = "Sensitive routes stayed behind the permission wall. No orders, customers, or settings mismatch."
+    else:
+        verdict = "STOP"
+        reason = "No authenticated admin UI was read."
+
     evaluate_data = {
         "source": "local-chrome",
         "snapshot_mode": "ax",
-        "loggedInAsStaff": True,
+        "loggedInAsStaff": bool(saw_admin),
         "grant": "Prodotti Visualizza",
         "routes": eval_routes_formatted,
         "mismatch": overall_mismatch,
+        "verdict": verdict,
         "extended_matrix": {
             "store_A_all": evaluated_routes_a,
             "store_B_all": evaluated_routes_b
@@ -268,11 +309,11 @@ async def execute_h1_5_matrix():
     protocol_data = {
         "timestamp": utc_str,
         "target": f"https://admin.shopify.com/store/{SHOP_A}",
-        "server_url": SSE_URL,
+        "server_url": "http://127.0.0.1:8000/sse/?token=redacted",
         "source": "local-phantom+chrome",
         "sessions": 1,
-        "verdict": "finding-candidate" if overall_mismatch else "PASS",
-        "reason": "Full UI vs API matrix evaluated across sensitive admin routes. ACL consistent with Products View only grant; no unauthorized data mismatch found." if not overall_mismatch else "UI vs API mismatch detected.",
+        "verdict": verdict,
+        "reason": reason,
         "results": [
             {
                 "tool": f"Staff route {r['path']}",
@@ -294,7 +335,7 @@ async def execute_h1_5_matrix():
         f"- **Timestamp (UTC)**: `{utc_str}`",
         f"- **Staff Grant**: `Prodotti Visualizza` (Products View only)",
         f"- **Primary Store**: `https://admin.shopify.com/store/{SHOP_A}`",
-        f"- **Verdict**: `{'finding-candidate' if overall_mismatch else 'PASS'}`",
+        f"- **Verdict**: `{verdict}`",
         f"- **Mismatch**: `{'true' if overall_mismatch else 'false'}`",
         "",
         "## Store A (Target) UI vs API Matrix",
@@ -304,7 +345,11 @@ async def execute_h1_5_matrix():
     ]
 
     for r in evaluated_routes_a:
-        md_lines.append(f"| `{r['path']}` | `{r['href']}` | **{r['deniedUI']}** | `{r['dataClass']}` | {r['http']} | {r['latency_ms']} | `{'TRUE' if r['mismatch'] else 'false'}` | {r['details'][:60]} |")
+        md_lines.append(
+            f"| `{r['path']}` | `{r.get('href','')}` | **{r.get('deniedUI')}** | `{r.get('dataClass')}` | "
+            f"{r.get('http')} | {r.get('latency_ms')} | `{'TRUE' if r.get('mismatch') else 'false'}` | "
+            f"{r.get('title','')} |"
+        )
 
     md_lines.extend([
         "",
@@ -315,14 +360,17 @@ async def execute_h1_5_matrix():
     ])
 
     for r in evaluated_routes_b:
-        md_lines.append(f"| `{r['path']}` | `{r['href']}` | **{r['deniedUI']}** | `{r['dataClass']}` | {r['http']} | {r['latency_ms']} | {r['details'][:60]} |")
+        md_lines.append(
+            f"| `{r['path']}` | `{r.get('href','')}` | **{r.get('deniedUI')}** | `{r.get('dataClass')}` | "
+            f"{r.get('http')} | {r.get('latency_ms')} | {r.get('title','')} |"
+        )
 
     md_lines.extend([
         "",
         "## Conclusion & Findings",
-        "- **ACL Consistency**: All sensitive routes (`/orders`, `/customers`, `/themes`, `/settings/general`, `/settings/payments`) consistently present the required permission wall (`deniedUI: true`).",
-        "- **Data Isolation**: No orders, customers PII, theme files, or payment settings were returned or leaked into the DOM.",
-        "- **Result**: The UI vs API boundaries are consistent with the grant. `mismatch: false`."
+        f"- **Verdict**: `{verdict}`",
+        f"- **Mismatch**: `{'true' if overall_mismatch else 'false'}`",
+        f"- **Reason**: {reason}",
     ])
 
     smoke_path = os.path.join(run_dir, "SMOKE.md")

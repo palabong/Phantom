@@ -7,7 +7,10 @@ import asyncio
 from mcp.client.sse import sse_client
 from mcp import ClientSession
 
-SSE_URL = "http://127.0.0.1:8000/sse/?token=ph_live_D2aZuYtdGL6tUfuV2egoxp"
+SSE_URL = os.environ.get("PHANTOM_SSE_URL") or (
+    "http://127.0.0.1:8000/sse/?token="
+    + os.environ.get("PHANTOM_AUTH_TOKEN", "ph_live_local_verify")
+)
 
 STORE_A = "https://funk-it-up-sdzgxmea.myshopify.com"
 STORE_B = "https://xxxxxx-r48zg9i1.myshopify.com"
@@ -162,18 +165,8 @@ async def navigate_and_parse_json(session, url):
     return {"error": "parse", "raw": str(data)[:400]}
 
 
-def _storefront_password():
-    env = os.environ.get("STOREFRONT_PASSWORD")
-    if env:
-        return env
-    root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
-    unlock = os.path.join(root, "unlock.py")
-    try:
-        text = open(unlock, encoding="utf-8").read()
-        m = re.search(r'call_tool\("type",\s*\{[^}]*"text":\s*"([^"]+)"', text)
-        return m.group(1) if m else ""
-    except OSError:
-        return ""
+def _same_host(base, href):
+    return str(href or "").startswith(base + "/") or str(href or "").rstrip("/") == base.rstrip("/")
 
 
 async def page_state(session):
@@ -188,64 +181,130 @@ async def page_state(session):
     )
 
 
-async def unlock_if_needed(session, base, run_dir):
-    await session.call_tool("navigate", {"url": f"{base}/password"})
+def _gate_refs(snapshot_text):
+    """Password input and Enter submit from an HTML AOM snapshot.
+
+    authenticity_token and the Log in here link are never selected.
+    """
+    password_ref = None
+    enter_ref = None
+    pattern = re.compile(r"\[(e\d+):\s+(INPUT|BUTTON|A)\s+'([^']*)'\]")
+    matches = list(pattern.finditer(snapshot_text or ""))
+    for i, match in enumerate(matches):
+        ref, tag, context = match.group(1), match.group(2), match.group(3)
+        end = matches[i + 1].start() if i + 1 < len(matches) else len(snapshot_text)
+        trail = snapshot_text[match.end():end]
+        if tag == "INPUT" and context == "password":
+            password_ref = ref
+        elif tag == "BUTTON" and (
+            context.lower() == "enter" or re.search(r"\bEnter\b", trail)
+        ):
+            enter_ref = ref
+    return password_ref, enter_ref
+
+
+def _redact(text, secret):
+    if secret and secret in str(text):
+        return str(text).replace(secret, "[REDACTED]")
+    return str(text)
+
+
+def _scrub_secret(secret):
+    """Remove a gate secret from the engine log. Do not print it."""
+    if not secret:
+        return
+    path = "/tmp/phantom_engine.log"
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as handle:
+            text = handle.read()
+    except OSError:
+        return
+    if secret not in text:
+        return
+    with open(path, "w", encoding="utf-8") as handle:
+        handle.write(text.replace(secret, "[REDACTED]"))
+
+
+async def unlock_if_needed(session, base, run_dir, store_id):
+    """Open the storefront. Store A may be unlocked once when PH_GATE_A is set.
+
+    The secret is typed into the password input and submitted with Enter.
+    It is not printed, archived, or retried. Store B is never typed.
+    """
+    await session.call_tool("navigate", {"url": f"{base}/"})
     await session.call_tool("wait", {"delay_ms": 1500})
     st = await page_state(session)
     if "Just a moment" in str(st.get("title", "")):
         with open(os.path.join(run_dir, "STOP.txt"), "w", encoding="utf-8") as f:
             f.write("CLOUDFLARE_CAPTCHA_DETECTED")
-        return "CLOUDFLARE"
-    if not st.get("hasPasswordForm") and "/password" not in str(st.get("path", "")):
-        return "OPEN"
-    pwd = _storefront_password()
-    if not pwd:
-        return "GATE"
-    payload = json.dumps(pwd)
-    await session.call_tool(
-        "evaluate",
-        {
-            "expression": f"""(() => {{
-                const inp = document.querySelector('input[type=password], input[name=password]');
-                if (!inp) return JSON.stringify({{ok:false, reason:'no-input'}});
-                const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
-                setter.call(inp, {payload});
-                inp.dispatchEvent(new Event('input', {{bubbles:true}}));
-                inp.dispatchEvent(new Event('change', {{bubbles:true}}));
-                const form = inp.form || document.querySelector('form[action*="password"]') || document.querySelector('form');
-                if (form) {{ form.submit(); return JSON.stringify({{ok:true, via:'submit'}}); }}
-                return JSON.stringify({{ok:false, reason:'no-form'}});
-            }})()"""
-        },
+        return "CLOUDFLARE", False
+    href = str(st.get("href", ""))
+    if href and not _same_host(base, href):
+        with open(os.path.join(run_dir, "STOP.txt"), "w", encoding="utf-8") as f:
+            f.write("HOST_LEFT")
+        return "HOST", False
+    gated = st.get("hasPasswordForm") or "/password" in str(st.get("path", ""))
+    if not gated:
+        return "OPEN", False
+
+    secret = os.environ.get("PH_GATE_A", "") if store_id == "A" else ""
+    if not secret:
+        return "GATE", False
+
+    snap = await session.call_tool("get_snapshot", {"mode": "html"})
+    password_ref, _enter_ref = _gate_refs(_tool_text(snap))
+    if not password_ref:
+        return "GATE-SHAPE", False
+    try:
+        await session.call_tool("type", {"ref": password_ref, "text": secret})
+    except Exception as exc:
+        print(f"    unlock_type_failed {_redact(exc, secret)}", flush=True)
+        return "GATE-STUCK", True
+
+    filled = await eval_json(
+        session,
+        """JSON.stringify({
+            n: (document.querySelector('input[name=password]') || {value: ''}).value.length
+        })""",
     )
-    await session.call_tool("wait", {"delay_ms": 3500})
-    st2 = await page_state(session)
-    if not st2.get("hasPasswordForm") and "/password" not in str(st2.get("path", "")):
-        return "UNLOCKED"
-    html = _tool_text(await session.call_tool("get_snapshot", {"mode": "ax"}))
-    pwd_ref = "ax13"
-    m_pwd = re.search(
-        r"\[((?:ax|e)\d+):\s+(?:INPUT|TEXTBOX|TEXTFIELD)[^\]]*?(?:password|Enter store using password|Enter store password)[^\]]*?\]",
-        html,
-        re.I,
-    )
-    if m_pwd:
-        pwd_ref = m_pwd.group(1)
-    btn_ref = "ax15"
-    m_btn = re.search(
-        r"\[((?:ax|e)\d+):\s+(?:BUTTON|INPUT)[^\]]*?(?:Enter|Submit)[^\]]*?\]",
-        html,
-        re.I,
-    )
-    if m_btn:
-        btn_ref = m_btn.group(1)
-    await session.call_tool("type", {"ref": pwd_ref, "text": pwd, "clear": True})
-    await session.call_tool("click", {"ref": btn_ref})
-    await session.call_tool("wait", {"delay_ms": 3500})
-    st3 = await page_state(session)
-    if st3.get("hasPasswordForm") or "/password" in str(st3.get("path", "")):
-        return "GATE-STUCK"
-    return "UNLOCKED"
+    if not isinstance(filled, dict) or int(filled.get("n") or 0) != len(secret):
+        # Char key events did not fill the field. Assign the value once, then submit.
+        print("    unlock_field_assign", flush=True)
+        expr = (
+            "(() => { const el = document.querySelector('input[name=password]');"
+            " if (!el) return JSON.stringify({ok:false,n:0});"
+            " el.focus(); el.value = " + json.dumps(secret) + ";"
+            " el.dispatchEvent(new Event('input', {bubbles:true}));"
+            " el.dispatchEvent(new Event('change', {bubbles:true}));"
+            " return JSON.stringify({ok:true,n:el.value.length}); })()"
+        )
+        try:
+            filled = await eval_json(session, expr)
+        finally:
+            _scrub_secret(secret)
+        if not isinstance(filled, dict) or int(filled.get("n") or 0) != len(secret):
+            print("    unlock_field_empty", flush=True)
+            return "GATE-STUCK", True
+
+    snap = await session.call_tool("get_snapshot", {"mode": "html"})
+    _password_ref, enter_ref = _gate_refs(_tool_text(snap))
+    if not enter_ref:
+        return "GATE-STUCK", True
+    await session.call_tool("click", {"ref": enter_ref})
+    await session.call_tool("wait", {"delay_ms": 8000})
+    st = await page_state(session)
+    if "Just a moment" in str(st.get("title", "")):
+        with open(os.path.join(run_dir, "STOP.txt"), "w", encoding="utf-8") as f:
+            f.write("CLOUDFLARE_CAPTCHA_DETECTED")
+        return "CLOUDFLARE", True
+    href = str(st.get("href", ""))
+    if href and not _same_host(base, href):
+        with open(os.path.join(run_dir, "STOP.txt"), "w", encoding="utf-8") as f:
+            f.write("HOST_LEFT")
+        return "HOST", True
+    if st.get("hasPasswordForm") or "/password" in str(st.get("path", "")):
+        return "GATE-STUCK", True
+    return "OPEN", True
 
 
 async def harvest_handles(session, base):
@@ -280,11 +339,58 @@ async def fetch_cart_js(session, base):
     return data if isinstance(data, dict) else {"error": "parse"}
 
 
+async def fetch_catalog_api(session, base, run_dir):
+    """Ajax catalog: /products.json. This is the API surface, distinct from /products/{handle}.js."""
+    data = await navigate_and_parse_json(session, f"{base}/products.json?limit=250")
+    if not isinstance(data, dict):
+        return {}, {"error": "parse"}
+    if data.get("_cloudflare"):
+        with open(os.path.join(run_dir, "STOP.txt"), "w", encoding="utf-8") as f:
+            f.write("CLOUDFLARE_CAPTCHA_DETECTED")
+        return {}, data
+    if data.get("_gate"):
+        return {}, data
+    href = str(data.get("href") or "")
+    if href and not _same_host(base, href):
+        with open(os.path.join(run_dir, "STOP.txt"), "w", encoding="utf-8") as f:
+            f.write("HOST_LEFT")
+        return {}, {"_host": href}
+    if not isinstance(data.get("products"), list):
+        return {}, {"ok": False, "error": data.get("error") or "no_products_key"}
+    products = data.get("products")
+    index = {}
+    for product in products:
+        if not isinstance(product, dict) or not product.get("handle"):
+            continue
+        variants = product.get("variants") or []
+        first = variants[0] if variants else {}
+        price = first.get("price")
+        available = first.get("available")
+        if available is None:
+            available = product.get("available")
+        index[product["handle"]] = {
+            "api_price": _dollar_price(price) if price is not None else "",
+            "api_available": available,
+            "api_variant_id": str(first.get("id") or ""),
+            "api_variants_count": len(variants),
+        }
+    return index, {"ok": True, "count": len(index)}
+
+
 def _cents_to_price(cents):
+    """Product .js prices are integer cents."""
     try:
         return f"${float(cents) / 100:.2f}"
     except (TypeError, ValueError):
         return str(cents or "")
+
+
+def _dollar_price(value):
+    """products.json prices are decimal currency strings, not cents."""
+    try:
+        return f"${float(str(value).replace(',', '').strip()):.2f}"
+    except (TypeError, ValueError):
+        return str(value or "")
 
 
 def apply_cart_item(row, item):
@@ -311,12 +417,17 @@ def norm_price(p):
     return str(p).replace("$", "").replace(",", "").strip()
 
 
-async def process_handle(session, base, handle, listing_price, store_id, run_dir):
+async def process_handle(session, base, handle, api_product, store_id, run_dir):
+    api_product = api_product or {}
     row = {
         "store": store_id,
         "handle": handle,
-        "listing_price": listing_price,
+        "ui_price": "",
         "js_price": "",
+        "api_price": api_product.get("api_price", ""),
+        "api_available": api_product.get("api_available"),
+        "api_variant_id": api_product.get("api_variant_id", ""),
+        "api_missing": not bool(api_product),
         "js_available": None,
         "js_variants_count": 0,
         "js_variant_id": "",
@@ -372,6 +483,12 @@ async def process_handle(session, base, handle, listing_price, store_id, run_dir
     st = await page_state(session)
     row["href"] = st.get("href", pdp_url)
     row["title"] = st.get("title", "")
+    if row["href"] and not _same_host(base, row["href"]):
+        with open(os.path.join(run_dir, "STOP.txt"), "w", encoding="utf-8") as f:
+            f.write("HOST_LEFT")
+        row["flags"].append("HOST")
+        row["latency_ms"] = round((time.perf_counter() - t0) * 1000, 1)
+        return row, True
     if "/checkout" in str(st.get("href", "")):
         with open(os.path.join(run_dir, "STOP.txt"), "w", encoding="utf-8") as f:
             f.write("CHECKOUT_OPENED")
@@ -428,217 +545,128 @@ async def process_handle(session, base, handle, listing_price, store_id, run_dir
     row["compare_at_visible"] = bool(pdp_info.get("compare_at"))
     row["sold_out_text"] = bool(pdp_info.get("sold_out"))
     row["has_add_form"] = bool(pdp_info.get("has_add_form"))
-
-    snap = _tool_text(await session.call_tool("get_snapshot", {"mode": "ax"}))
-    btn_ref = find_add_to_cart_ref(snap)
-    if btn_ref:
-        await session.call_tool("click", {"ref": btn_ref})
-        await session.call_tool("wait", {"delay_ms": 1500})
-        cart_data = await eval_json(
-            session,
-            """JSON.stringify({
-                href: location.href,
-                error: (() => {
-                    let errEl = document.querySelector('.product-form__error-message-wrapper:not([hidden]), .form__message--error, .product-form__error-message');
-                    return (errEl && !errEl.closest('[hidden]')) ? errEl.innerText.trim() : "";
-                })(),
-                cart_count: (() => {
-                    let countEl = document.querySelector('.cart-count-bubble, .header__cart-count, [data-cart-count], .cart-link__bubble');
-                    return countEl ? countEl.innerText.trim() : "";
-                })(),
-                drawer_visible: !!document.querySelector('cart-notification.animate, cart-drawer.animate, .drawer.active')
-            })""",
-        )
-        if not isinstance(cart_data, dict):
-            cart_data = {}
-        if "/checkout" in str(cart_data.get("href", "")):
-            with open(os.path.join(run_dir, "STOP.txt"), "w", encoding="utf-8") as f:
-                f.write("CHECKOUT_OPENED")
-            row["flags"].append("CHECKOUT")
-            return row, True
-        if cart_data.get("error"):
-            row["cart_add_result"] = f"error: {cart_data.get('error')}"
-        elif cart_data.get("cart_count") or cart_data.get("drawer_visible") or "/cart" in str(cart_data.get("href", "")):
-            row["cart_add_result"] = "added"
-        else:
-            row["cart_add_result"] = "200"
-    elif row["has_add_form"] and row["js_variant_id"]:
-        row["cart_add_result"] = "no_click_ref"
-
-    async def post_add_form():
-        if not row["js_variant_id"]:
-            return
-        vid = str(row["js_variant_id"])
-        await session.call_tool(
-            "evaluate",
-            {
-                "expression": f"""(() => {{
-                    const f = document.createElement('form');
-                    f.method = 'POST';
-                    f.action = '/cart/add';
-                    f.style.display = 'none';
-                    const id = document.createElement('input');
-                    id.name = 'id';
-                    id.value = {json.dumps(vid)};
-                    const qty = document.createElement('input');
-                    qty.name = 'quantity';
-                    qty.value = '1';
-                    f.appendChild(id);
-                    f.appendChild(qty);
-                    document.body.appendChild(f);
-                    f.submit();
-                    return 'submitted';
-                }})()"""
-            },
-        )
-        await session.call_tool("wait", {"delay_ms": 2000})
-        st_add = await page_state(session)
-        if "/checkout" in str(st_add.get("href", "")):
-            with open(os.path.join(run_dir, "STOP.txt"), "w", encoding="utf-8") as f:
-                f.write("CHECKOUT_OPENED")
-            row["flags"].append("CHECKOUT")
-            return True
-        row["cart_add_result"] = "added_form"
-        row["add_js_status"] = 200
-        return False
-
-    async def read_cart_line():
-        cart = await fetch_cart_js(session, base)
-        if isinstance(cart, dict) and cart.get("_cloudflare"):
-            return True
-        if isinstance(cart, dict) and cart.get("_gate"):
-            row["gate"] = True
-            return False
-        items = cart.get("items") if isinstance(cart, dict) else None
-        if isinstance(items, list):
-            for item in items:
-                if item_matches_handle(item, handle):
-                    apply_cart_item(row, item)
-                    row["add_js_price"] = row.get("add_js_price") or row.get("cart_line_price") or ""
-                    row["add_js_qty"] = row.get("add_js_qty") or row.get("cart_line_qty") or ""
-                    return False
-        return False
-
-    hard = await read_cart_line()
-    if hard:
-        row["flags"].append("CLOUDFLARE")
-        return row, True
-    if not row.get("cart_line") and row.get("js_variant_id"):
-        add_result = str(row.get("cart_add_result") or "")
-        if not add_result.startswith("error:"):
-            stopped = await post_add_form()
-            if stopped:
-                return row, True
-            hard = await read_cart_line()
-            if hard:
-                row["flags"].append("CLOUDFLARE")
-                return row, True
-
+    row["ui_price"] = row["pdp_price"]
     row["latency_ms"] = round((time.perf_counter() - t0) * 1000, 1)
     return row, False
 
 
+DISCREPANCY_FLAGS = (
+    "ui_ne_json",
+    "ui_ne_api",
+    "json_ne_api",
+    "availability_ui_ne_json",
+    "availability_ui_ne_api",
+    "availability_json_ne_api",
+    "api_omits_ui_json",
+)
+
+
 def score_row(row, collections_meta):
     flags = list(row.get("flags") or [])
-    nlp = norm_price(row.get("listing_price"))
-    njp = norm_price(row.get("js_price"))
-    npp = norm_price(row.get("pdp_price"))
-    ncp = norm_price(row.get("cart_line_price"))
-    nap = norm_price(row.get("add_js_price"))
+    ui = norm_price(row.get("ui_price") or row.get("pdp_price"))
+    js = norm_price(row.get("js_price"))
+    api = norm_price(row.get("api_price"))
     handle = row["handle"]
-    money = bool(row.get("cart_line"))
 
     if row.get("gate"):
         return flags, False, "gate"
 
-    if nlp and npp and nlp != npp:
-        flags.append("listing_ne_pdp")
-    if money and ncp and npp and ncp != npp:
-        flags.append("cart_ne_pdp")
-    if money and ncp and nlp and ncp != nlp:
-        flags.append("cart_ne_listing")
-    if money and ncp and njp and ncp != njp:
-        flags.append("cart_ne_js")
-    if money and nap and npp and nap != npp:
-        flags.append("addjs_ne_pdp")
-    if money and nap and nlp and nap != nlp:
-        flags.append("addjs_ne_listing")
-    if money and nap and njp and nap != njp:
-        flags.append("addjs_ne_js")
-    if money and nap and ncp and nap != ncp:
-        flags.append("addjs_ne_cart")
-    if row.get("js_available") is False and row.get("cart_add_result") in ("added", "200", "added_js") and money:
-        flags.append("unavailable_but_carted")
-    if row.get("sold_out_text") and money:
-        flags.append("sold_out_text_but_carted")
-    pq, cq = str(row.get("pdp_qty", "1")), str(row.get("cart_line_qty", "-"))
-    if money and cq != "-" and pq != "-" and pq != cq:
-        flags.append("qty_mismatch")
-    if handle in HIDDEN_ARCHIVED and money:
-        flags.append("hidden_or_archived_purchasable")
-    if handle in HIDDEN_ARCHIVED and not money:
-        flags.append("hidden_or_archived_public_price_no_line")
-    if handle == "the-compare-at-price-snowboard" and row.get("compare_at_visible") and money:
-        flags.append("compare_at_carted")
-    listed_hidden = bool(collections_meta.get("listed_hidden"))
-    listed_archived = bool(collections_meta.get("listed_archived"))
-    if handle == "the-hidden-snowboard" and listed_hidden:
+    if ui and js and ui != js:
+        flags.append("ui_ne_json")
+    if ui and api and ui != api:
+        flags.append("ui_ne_api")
+    if js and api and js != api:
+        flags.append("json_ne_api")
+    if row.get("catalog_ok") and row.get("api_missing") and (ui or js):
+        flags.append("api_omits_ui_json")
+
+    js_av = row.get("js_available")
+    api_av = row.get("api_available")
+    ui_sold = bool(row.get("sold_out_text"))
+    ui_add = bool(row.get("has_add_form"))
+    if js_av is True and ui_sold:
+        flags.append("availability_ui_ne_json")
+    if js_av is False and ui_add and not ui_sold:
+        flags.append("availability_ui_ne_json")
+    if api_av is True and ui_sold:
+        flags.append("availability_ui_ne_api")
+    if api_av is False and ui_add and not ui_sold:
+        flags.append("availability_ui_ne_api")
+    if api_av is not None and js_av is not None and bool(api_av) != bool(js_av):
+        flags.append("availability_json_ne_api")
+
+    if handle == "the-hidden-snowboard" and collections_meta.get("listed_hidden"):
         flags.append("collections_lists_hidden")
-    if handle == "the-archived-snowboard" and listed_archived:
+    if handle == "the-archived-snowboard" and collections_meta.get("listed_archived"):
         flags.append("collections_lists_archived")
 
-    # Spec: ticket only if money moved or publish-state contradiction with a cart line.
-    ticket = any(
-        f in flags
-        for f in (
-            "cart_ne_pdp",
-            "cart_ne_listing",
-            "cart_ne_js",
-            "addjs_ne_pdp",
-            "addjs_ne_listing",
-            "addjs_ne_js",
-            "addjs_ne_cart",
-            "unavailable_but_carted",
-            "sold_out_text_but_carted",
-            "qty_mismatch",
-            "hidden_or_archived_purchasable",
-        )
-    )
-    return flags, ticket, "ticket" if ticket else ("informational" if flags else "ok")
+    discrepancy = any(flag in flags for flag in DISCREPANCY_FLAGS)
+    if discrepancy:
+        return flags, True, "discrepancy"
+    if flags:
+        return flags, False, "informational"
+    return flags, False, "ok"
 
 
-async def run_store(session, store_id, base, handles, listing_map, run_dir):
-    print(f"\n[*] Store {store_id} unlock {base}")
-    unlock = await unlock_if_needed(session, base, run_dir)
-    print(f"    unlock={unlock}")
-    if unlock == "CLOUDFLARE":
-        return [], {"unlock": unlock}, True
-    if unlock in ("GATE", "GATE-STUCK"):
+async def run_store(session, store_id, base, handles, run_dir):
+    print(f"\n[*] Store {store_id} observe {base}")
+    unlock, password_typed = await unlock_if_needed(session, base, run_dir, store_id)
+    print(f"    gate={unlock} password_typed={str(bool(password_typed)).lower()}")
+    store_meta = {"unlock": unlock, "password_typed": bool(password_typed)}
+    if unlock in ("CLOUDFLARE", "HOST"):
+        return [], store_meta, True
+    if unlock in ("GATE", "GATE-STUCK", "GATE-SHAPE"):
         return [
             {
                 "store": store_id,
                 "handle": "_store_",
                 "gate": True,
-                "cart_add_result": unlock,
                 "flags": [unlock],
+                "status": "gate",
                 "latency_ms": 0,
             }
-        ], {"unlock": unlock}, False
+        ], store_meta, False
 
-    print(f"    clearing cart")
-    await session.call_tool("navigate", {"url": f"{base}/cart/clear"})
-    await session.call_tool("wait", {"delay_ms": 800})
+    api_index, api_meta = await fetch_catalog_api(session, base, run_dir)
+    print(f"    api_products={api_meta.get('count', 0)}")
+    if api_meta.get("_cloudflare") or api_meta.get("_host"):
+        store_meta["api"] = api_meta
+        return [], store_meta, True
+    if api_meta.get("_gate"):
+        store_meta["unlock"] = "GATE"
+        store_meta["api"] = api_meta
+        return [
+            {
+                "store": store_id,
+                "handle": "_store_",
+                "gate": True,
+                "flags": ["GATE"],
+                "status": "gate",
+                "latency_ms": 0,
+            }
+        ], store_meta, False
 
     harvested, collections_meta, gated = await harvest_handles(session, base)
     collections_meta = collections_meta if isinstance(collections_meta, dict) else {}
     collections_meta["unlock"] = unlock
+    collections_meta["password_typed"] = bool(password_typed)
     collections_meta["harvested_count"] = len(harvested)
+    collections_meta["api_count"] = api_meta.get("count", 0)
     if gated:
-        collections_meta["unlock"] = "GATE_AFTER_UNLOCK"
-        return [], collections_meta, False
+        collections_meta["unlock"] = "GATE_AFTER_OPEN"
+        collections_meta["password_typed"] = bool(password_typed)
+        return [
+            {
+                "store": store_id,
+                "handle": "_store_",
+                "gate": True,
+                "flags": ["GATE"],
+                "status": "gate",
+                "latency_ms": 0,
+            }
+        ], collections_meta, False
 
     use_handles = harvested or list(handles)
-    # Always include primitives on Store A even if collection omitted them.
     if store_id == "A":
         for h in PRIMITIVES_A:
             if h not in use_handles:
@@ -646,19 +674,20 @@ async def run_store(session, store_id, base, handles, listing_map, run_dir):
 
     rows = []
     for idx, handle in enumerate(use_handles, 1):
-        print(f"    [{idx}/{len(use_handles)}] {store_id}:{handle}")
+        print(f"    [{idx}/{len(use_handles)}] {store_id}:{handle}", flush=True)
         row, hard = await process_handle(
-            session, base, handle, listing_map.get(handle, ""), store_id, run_dir
+            session, base, handle, api_index.get(handle), store_id, run_dir
         )
-        flags, ticket, status = score_row(row, collections_meta)
+        row["catalog_ok"] = bool(api_meta.get("ok"))
+        flags, discrepancy, status = score_row(row, collections_meta)
         row["flags"] = flags
-        row["ticket_candidate"] = ticket
+        row["discrepancy"] = discrepancy
         row["status"] = status
         rows.append(row)
         print(
-            f"      js={row.get('js_price')} pdp={row.get('pdp_price')} "
-            f"add={row.get('cart_add_result')} line={row.get('cart_line')} "
-            f"status={status}"
+            f"      ui={row.get('ui_price') or '-'} json={row.get('js_price') or '-'} "
+            f"api={row.get('api_price') or '-'} status={status} flags={flags}",
+            flush=True,
         )
         if hard:
             return rows, collections_meta, True
@@ -668,37 +697,36 @@ async def run_store(session, store_id, base, handles, listing_map, run_dir):
 async def main():
     utc_str = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     run_dir = f"runs/prod_postdeploy_{utc_str}"
-    os.makedirs(run_dir, exist_ok=True)
-    print(f"[*] H1-6 wider matrix → {run_dir}")
+    os.makedirs(run_dir, exist_ok=False)
+    print(f"[*] H1-6 UI/JSON/API discrepancy matrix → {run_dir}", flush=True)
 
     all_rows = []
     meta = {"A": {}, "B": {}}
     hard_stop = False
 
-    async with sse_client(SSE_URL) as streams:
-        async with ClientSession(streams[0], streams[1]) as session:
-            await session.initialize()
-            rows_a, meta_a, hard = await run_store(
-                session, "A", STORE_A, PRIMITIVES_A, {}, run_dir
-            )
-            meta["A"] = meta_a
-            all_rows.extend(rows_a)
-            if hard:
-                hard_stop = True
-            else:
-                rows_b, meta_b, hard = await run_store(
-                    session, "B", STORE_B, HANDLES_B_FALLBACK, LISTING_PRICES_B, run_dir
+    try:
+        async with sse_client(SSE_URL) as streams:
+            async with ClientSession(streams[0], streams[1]) as session:
+                await session.initialize()
+                rows_a, meta_a, hard = await run_store(
+                    session, "A", STORE_A, PRIMITIVES_A, run_dir
                 )
-                meta["B"] = meta_b
-                all_rows.extend(rows_b)
-                hard_stop = hard
+                meta["A"] = meta_a
+                all_rows.extend(rows_a)
+                if hard:
+                    hard_stop = True
+                else:
+                    rows_b, meta_b, hard = await run_store(
+                        session, "B", STORE_B, HANDLES_B_FALLBACK, run_dir
+                    )
+                    meta["B"] = meta_b
+                    all_rows.extend(rows_b)
+                    hard_stop = hard
+    finally:
+        _scrub_secret(os.environ.get("PH_GATE_A", ""))
 
-    tickets = [r for r in all_rows if r.get("ticket_candidate")]
-    informational = [
-        r
-        for r in all_rows
-        if r.get("status") == "informational" or "hidden_or_archived_public_price_no_line" in (r.get("flags") or [])
-    ]
+    discrepancies = [r for r in all_rows if r.get("discrepancy")]
+    informational = [r for r in all_rows if r.get("status") == "informational"]
 
     evaluate_data = {
         "timestamp_utc": utc_str,
@@ -716,33 +744,45 @@ async def main():
             "support_contact": False,
             "cdn_claim": False,
             "checkout_clicked": False,
-            "ticket_rule": "price/stock/publish contradiction that creates a cart line (money movement); public hidden/archived price without a line is informational",
+            "cart_mutated": False,
+            "surfaces": {
+                "ui": "PDP visible price and sold-out text",
+                "json": "/products/{handle}.js",
+                "api": "/products.json?limit=250",
+            },
+            "discrepancy_rule": "UI price or availability disagrees with product JSON or the products.json API",
         },
         "hard_stop": hard_stop,
         "summary": {
             "total_checks": len(all_rows),
-            "ticket_candidates": len(tickets),
+            "discrepancies": len(discrepancies),
             "informational": len(informational),
             "store_A_unlock": meta.get("A", {}).get("unlock"),
             "store_B_unlock": meta.get("B", {}).get("unlock"),
+            "store_A_password_typed": bool(meta.get("A", {}).get("password_typed")),
+            "store_B_password_typed": bool(meta.get("B", {}).get("password_typed")),
             "store_A_harvested": meta.get("A", {}).get("harvested_count"),
             "store_B_harvested": meta.get("B", {}).get("harvested_count"),
+            "store_A_api": meta.get("A", {}).get("api_count"),
+            "store_B_api": meta.get("B", {}).get("api_count"),
             "collections_lists_hidden": bool(meta.get("A", {}).get("listed_hidden")),
             "collections_lists_archived": bool(meta.get("A", {}).get("listed_archived")),
         },
-        "ticket_candidates": [
+        "discrepancies": [
             {
                 "store": r["store"],
                 "handle": r["handle"],
                 "flags": r.get("flags"),
+                "ui_price": r.get("ui_price"),
                 "js_price": r.get("js_price"),
-                "pdp_price": r.get("pdp_price"),
-                "cart_line": r.get("cart_line"),
-                "cart_line_price": r.get("cart_line_price"),
-                "cart_add_result": r.get("cart_add_result"),
+                "api_price": r.get("api_price"),
                 "js_available": r.get("js_available"),
+                "api_available": r.get("api_available"),
+                "sold_out_text": r.get("sold_out_text"),
+                "has_add_form": r.get("has_add_form"),
+                "href": r.get("href"),
             }
-            for r in tickets
+            for r in discrepancies
         ],
         "results": all_rows,
         "collections": meta,
@@ -752,24 +792,39 @@ async def main():
     with open(eval_path, "w", encoding="utf-8") as f:
         json.dump(evaluate_data, f, indent=2)
 
+    compared = [r for r in all_rows if not r.get("gate")]
+    if discrepancies:
+        verdict = "discrepancy"
+        reason = f"{len(discrepancies)} UI/JSON/API disagreements"
+    elif not compared and hard_stop:
+        verdict = "STOP"
+        reason = "A hard stop ended the compare before UI, JSON, and API were read."
+    elif not compared:
+        verdict = "GATE"
+        reason = "A storefront password gate stopped the read before UI, JSON, and API."
+    else:
+        verdict = "aligned"
+        if any(r.get("gate") for r in all_rows):
+            reason = "Compared rows match. One store stayed on the password gate and was not compared."
+        else:
+            reason = "UI price and availability match product JSON and products.json"
     protocol = {
         "timestamp": utc_str,
-        "target": "H1-6 wider storefront ticket-candidate matrix",
+        "target": "H1-6 UI vs product JSON vs products.json API",
         "server_url": "http://127.0.0.1:8000/sse/?token=redacted",
         "source": "local-phantom+chrome",
         "sessions": 1,
-        "verdict": "ticket-candidate" if tickets else "no-ticket",
-        "reason": (
-            f"{len(tickets)} cart-backed contradictions"
-            if tickets
-            else "No money-moving price/stock/publish contradiction; hidden/archived public price without a line is informational per spec/roadmap."
-        ),
+        "verdict": verdict,
+        "reason": reason,
         "results": [
             {
                 "tool": f"{r.get('store')}:{r.get('handle')}",
-                "status": "CANDIDATE" if r.get("ticket_candidate") else str(r.get("status", "ok")).upper(),
+                "status": "DISCREPANCY" if r.get("discrepancy") else str(r.get("status", "ok")).upper(),
                 "latency_ms": r.get("latency_ms"),
-                "details": f"add={r.get('cart_add_result')} line={r.get('cart_line')} flags={r.get('flags')}",
+                "details": (
+                    f"ui={r.get('ui_price')} json={r.get('js_price')} api={r.get('api_price')} "
+                    f"flags={r.get('flags')}"
+                ),
             }
             for r in all_rows
         ],
@@ -778,47 +833,40 @@ async def main():
         json.dump(protocol, f, indent=2)
 
     md = [
-        f"# H1-6 wider product matrix — {utc_str}",
+        f"# H1-6 UI / JSON / API discrepancy matrix — {utc_str}",
         "",
-        f"- **Spec asset**: `your-store.myshopify.com` (in-scope, bounty-eligible, self-created stores only)",
         f"- **Stores**: A `{STORE_A}` · B `{STORE_B}`",
-        f"- **Ticket candidates**: `{len(tickets)}`",
-        f"- **Verdict**: `{'ticket-candidate' if tickets else 'no-ticket'}`",
-        f"- **Unlock A/B**: `{meta.get('A', {}).get('unlock')}` / `{meta.get('B', {}).get('unlock')}`",
+        f"- **Surfaces**: UI = PDP price · JSON = `/products/{{handle}}.js` · API = `/products.json`",
+        f"- **Discrepancies**: `{len(discrepancies)}`",
+        f"- **Verdict**: `{verdict}`",
+        f"- **Gate A/B**: `{meta.get('A', {}).get('unlock')}` / `{meta.get('B', {}).get('unlock')}`",
+        "- **Cart**: not cleared, not added, checkout not opened",
         "",
         "## Matrix",
         "",
-        "| Store | Handle | JS Price | Available | PDP Price | Add | Cart line | Cart price | Flags | Status |",
+        "| Store | Handle | UI | JSON | API | JSON available | API available | UI sold out | Flags | Status |",
         "|---|---|---|---|---|---|---|---|---|---|",
     ]
     for r in all_rows:
         md.append(
-            f"| `{r.get('store')}` | `{r.get('handle')}` | {r.get('js_price') or '-'} | {r.get('js_available')} | "
-            f"{r.get('pdp_price') or '-'} | {r.get('cart_add_result')} | {r.get('cart_line')} | "
-            f"{r.get('cart_line_price')} | {','.join(r.get('flags') or []) or '-'} | **{r.get('status')}** |"
+            f"| `{r.get('store')}` | `{r.get('handle')}` | {r.get('ui_price') or '-'} | "
+            f"{r.get('js_price') or '-'} | {r.get('api_price') or '-'} | {r.get('js_available')} | "
+            f"{r.get('api_available')} | {r.get('sold_out_text')} | "
+            f"{','.join(r.get('flags') or []) or '-'} | **{r.get('status')}** |"
         )
-    md.extend(
-        [
-            "",
-            "## Ticket candidates (spec-eligible)",
-            "",
-        ]
-    )
-    if tickets:
-        for r in tickets:
-            md.append(f"- `{r['store']}:{r['handle']}` flags={r.get('flags')} line={r.get('cart_line_price')}")
+    md.extend(["", "## Discrepancies", ""])
+    if discrepancies:
+        for r in discrepancies:
+            md.append(
+                f"- `{r['store']}:{r['handle']}` ui={r.get('ui_price')} json={r.get('js_price')} "
+                f"api={r.get('api_price')} flags={r.get('flags')}"
+            )
     else:
-        md.append("None. Hidden/archived public prices without a cart line stay informational.")
-    md.extend(
-        [
-            "",
-            "## Spec mapping",
-            "- In scope: researcher `*.myshopify.com` only.",
-            "- Out: Support, CDN upload, third-party merchants, checkout click.",
-            "- Impact bar: contradiction that moves money (cart line), not title-only test-data.",
-            "",
-        ]
-    )
+        if not compared:
+            md.append("None compared. A storefront password gate stopped the read before UI, JSON, and API.")
+        else:
+            md.append("None. UI, product JSON, and products.json agree on price and availability.")
+    md.append("")
     content = "\n".join(md)
     with open(os.path.join(run_dir, "MATRIX.md"), "w", encoding="utf-8") as f:
         f.write(content)
@@ -827,7 +875,7 @@ async def main():
     with open(os.path.join(run_dir, "SMOKE.md"), "w", encoding="utf-8") as f:
         f.write(content)
 
-    print(f"[+] artifacts {run_dir} tickets={len(tickets)} hard_stop={hard_stop}")
+    print(f"[+] artifacts {run_dir} discrepancies={len(discrepancies)} hard_stop={hard_stop}", flush=True)
 
 
 if __name__ == "__main__":
